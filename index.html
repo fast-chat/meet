@@ -1,0 +1,1120 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>PeerJS Conference</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <style>
+        html {
+            height: 100%; /* Устанавливаем высоту html */
+        }
+        body {
+            background-color: #222;
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        #video-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 5px;
+            padding: 0px;
+            flex: 1;
+            overflow: hidden;
+        }
+        .video-container {
+            position: relative;
+            border: 2px solid #ccc;
+            border-radius: 8px;
+            overflow: hidden;
+            background: #f0f0f0;
+            transition: opacity 0.3s ease;
+        }
+        .video-container.local {
+            border-color: #4CAF50;
+        }
+        .video-container.hidden {
+            opacity: 0.3;
+            border-color: #ff6b6b;
+        }
+        .video-container.no-stream {
+            display: none;
+        }
+        video {
+            display: block;
+            object-fit: cover;
+            width: 100%;
+            height: 100%;
+        }
+        .user-info {
+            position: absolute;
+            bottom: 5px;
+            left: 5px;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            z-index: 10;
+        }
+        .stream-status {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            z-index: 10;
+        }
+        #logs {
+            display: none;
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            width: 400px;
+            height: 300px;
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 10px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+            z-index: 1000;
+        }
+        #status {
+            /*display: none;*/
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: monospace;
+        }
+        #controls {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 15px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 50px;
+            z-index: 1000;
+            opacity: 0.4;
+        }
+        .control-btn {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            border: none;
+            background: #4a4a4a;
+            color: white;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            transition: all 0.2s ease;
+        }
+        .control-btn:hover {
+            background: #5a5a5a;
+            transform: scale(1.1);
+        }
+        .control-btn.active {
+            background: #4CAF50;
+        }
+        .control-btn.muted {
+            background: #f44336;
+        }
+        .control-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .control-btn:disabled:hover {
+            transform: none;
+            background: #4a4a4a;
+        }
+        .control-btn i {
+            font-size: 24px;
+        }
+        /* Добавляем стиль для уведомлений */
+        .notification {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(255, 107, 107, 0.9);
+            color: white;
+            padding: 15px 20px;
+            border-radius: 8px;
+            z-index: 2000;
+            font-family: Arial, sans-serif;
+            font-size: 14px;
+            max-width: 80%;
+            text-align: center;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="status">Participants: <span id="participant-count">1</span></div>
+    <div id="video-grid"></div>
+    <div id="logs"></div>
+    <div id="notification" class="notification"></div>
+    
+    <div id="controls">
+        <button id="toggle-video" class="control-btn active">
+            <i class="material-icons">videocam</i>
+        </button>
+        <button id="toggle-audio" class="control-btn active">
+            <i class="material-icons">mic</i>
+        </button>
+        <button id="switch-camera" class="control-btn">
+            <i class="material-icons">switch_video</i>
+        </button>
+    </div>
+    
+    <script>
+        function log(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = `[${timestamp}] ${message}`;
+            console.log(logEntry);
+            
+            const logsDiv = document.getElementById('logs');
+            if (logsDiv) {
+                const p = document.createElement('p');
+                p.textContent = logEntry;
+                logsDiv.appendChild(p);
+                logsDiv.scrollTop = logsDiv.scrollHeight;
+            }
+        }
+
+        const roomID = window.location.hash.substring(1) || 'default-room';
+        log(`Room ID: ${roomID}`);
+        log(`URL: ${window.location.href}`);
+
+        let peer;
+        let localStream;
+        const connections = {};
+        const activeCalls = {}; // Храним активные вызовы для обновления треков
+        const participants = new Set();
+        const videoContainers = {};
+        const streamMonitors = {}; // Для хранения интервалов мониторинга
+        const videoGrid = document.getElementById('video-grid');
+        let isRoomHost = false;
+        let retryCount = 0;
+        const MAX_RETRIES = 3;
+        let hostConnection = null;
+        let reloadScheduled = false;
+        let isVideoEnabled = true;
+        let isAudioEnabled = true;
+        let currentDeviceId = null; // ID текущей камеры
+        let availableCameras = [];
+        let cameraAvailability = {}; // Кэш доступности камер
+
+        // Элементы управления
+        const toggleVideoBtn = document.getElementById('toggle-video');
+        const toggleAudioBtn = document.getElementById('toggle-audio');
+        const switchCameraBtn = document.getElementById('switch-camera');
+
+        // Инициализация обработчиков кнопок
+        toggleVideoBtn.addEventListener('click', toggleVideo);
+        toggleAudioBtn.addEventListener('click', toggleAudio);
+        switchCameraBtn.addEventListener('click', switchCamera);
+
+        // Функция показа уведомления
+        function showNotification(message, duration = 3000) {
+            const notification = document.getElementById('notification');
+            if (notification) {
+                notification.textContent = message;
+                notification.style.display = 'block';
+                
+                setTimeout(() => {
+                    notification.style.display = 'none';
+                }, duration);
+            }
+        }
+
+        // Функция для получения информации о доступных камерах
+        async function getAvailableCameras() {
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const videoDevices = devices.filter(device => device.kind === 'videoinput');
+                
+                log(`Найдено камер: ${videoDevices.length}`);
+                videoDevices.forEach((device, index) => {
+                    log(`Камера ${index}: ${device.label || 'Неизвестная камера'} (ID: ${device.deviceId})`);
+                });
+                
+                return videoDevices;
+            } catch (error) {
+                log(`Ошибка получения списка камер: ${error}`);
+                return [];
+            }
+        }
+
+        // Функция для получения точной информации об ошибке
+        function getCameraErrorDetails(error) {
+            let details = '';
+            
+            switch (error.name) {
+                case 'NotReadableError':
+                    details = 'Камера занята другим приложением или недоступна';
+                    break;
+                case 'NotFoundError':
+                    details = 'Камера не найдена';
+                    break;
+                case 'NotAllowedError':
+                    details = 'Доступ к камере запрещен';
+                    break;
+                case 'OverconstrainedError':
+                    details = 'Запрошенные параметры камеры не поддерживаются';
+                    break;
+                default:
+                    details = 'Неизвестная ошибка доступа к камере';
+            }
+            
+            return `${error.name}: ${details}`;
+        }
+
+        // Функция переключения видео
+        function toggleVideo() {
+            if (!localStream) return;
+            
+            const videoTracks = localStream.getVideoTracks();
+            if (videoTracks.length > 0) {
+                isVideoEnabled = !isVideoEnabled;
+                videoTracks[0].enabled = isVideoEnabled;
+                
+                if (isVideoEnabled) {
+                    toggleVideoBtn.classList.add('active');
+                    toggleVideoBtn.classList.remove('muted');
+                    log('Камера включена');
+                } else {
+                    toggleVideoBtn.classList.remove('active');
+                    toggleVideoBtn.classList.add('muted');
+                    log('Камера выключена');
+                }
+                
+                // Обновляем иконку
+                toggleVideoBtn.querySelector('i').textContent = isVideoEnabled ? 'videocam' : 'videocam_off';
+            }
+        }
+
+        // Функция переключения аудио
+        function toggleAudio() {
+            if (!localStream) return;
+            
+            const audioTracks = localStream.getAudioTracks();
+            if (audioTracks.length > 0) {
+                isAudioEnabled = !isAudioEnabled;
+                audioTracks[0].enabled = isAudioEnabled;
+                
+                if (isAudioEnabled) {
+                    toggleAudioBtn.classList.add('active');
+                    toggleAudioBtn.classList.remove('muted');
+                    log('Микрофон включен');
+                } else {
+                    toggleAudioBtn.classList.remove('active');
+                    toggleAudioBtn.classList.add('muted');
+                    log('Микрофон выключен');
+                }
+                
+                // Обновляем иконку
+                toggleAudioBtn.querySelector('i').textContent = isAudioEnabled ? 'mic' : 'mic_off';
+                
+                // Обновляем все активные вызовы с новым состоянием аудио
+                updateAllCalls(localStream);
+            }
+        }
+
+        // Функция проверки доступности камеры
+        async function checkCameraAvailability(deviceId) {
+            // Проверяем кэш сначала
+            if (cameraAvailability[deviceId] !== undefined) {
+                return cameraAvailability[deviceId];
+            }
+            
+            try {
+                // Пробуем получить доступ к камера
+                const constraints = {
+                    video: { deviceId: { exact: deviceId } }
+                };
+                
+                const testStream = await navigator.mediaDevices.getUserMedia(constraints);
+                testStream.getTracks().forEach(track => track.stop());
+                
+                log(`Камера ${deviceId} доступна`);
+                cameraAvailability[deviceId] = true;
+                return true;
+            } catch (error) {
+                log(`Камера ${deviceId} недоступна: ${error}`);
+                cameraAvailability[deviceId] = false;
+                return false;
+            }
+        }
+
+        // Функция переключения камеры (улучшенная версия)
+        async function switchCamera() {
+            log('Переключение камеры...');
+            switchCameraBtn.disabled = true;
+            
+            try {
+                // Получаем список доступных камер
+                const cameras = await getAvailableCameras();
+                
+                if (cameras.length < 2) {
+                    showNotification('Доступна только одна камера', 2000);
+                    log('Доступна только одна камера, переключение невозможно');
+                    switchCameraBtn.disabled = false;
+                    return;
+                }
+                
+                // Определяем текущую камеру
+                const currentCamera = await getCurrentCamera();
+                let currentIndex = cameras.findIndex(cam => cam.deviceId === currentCamera);
+                
+                // Если не нашли текущую камеру, начинаем с первой
+                if (currentIndex === -1) currentIndex = 0;
+                
+                // Пытаемся найти следующую доступную камеру
+                let nextIndex = (currentIndex + 1) % cameras.length;
+                let attempts = 0;
+                let foundCamera = false;
+                
+                while (attempts < cameras.length && !foundCamera) {
+                    const camera = cameras[nextIndex];
+                    log(`Попытка переключения на камеру ${nextIndex}: ${camera.label || 'Неизвестная камера'} (ID: ${camera.deviceId})`);
+                    
+                    // Проверяем доступность камеры
+                    const isAvailable = await checkCameraAvailability(camera.deviceId);
+                    
+                    if (isAvailable) {
+                        // Пытаемся переключиться на эту камеру
+                        try {
+                            const constraints = {
+                                video: { deviceId: { exact: camera.deviceId } },
+                                audio: true // Всегда запрашиваем аудио, состояние настроим позже
+                            };
+                            
+                            log(`Пытаемся получить доступ с constraints: ${JSON.stringify(constraints)}`);
+                            
+                            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                            
+                            // Сохраняем состояние аудио из старого потока
+                            const audioTracks = stream.getAudioTracks();
+                            if (audioTracks.length > 0) {
+                                audioTracks[0].enabled = isAudioEnabled;
+                            }
+                            
+                            // Сохраняем старый поток для последующей остановки
+                            const oldStream = localStream;
+                            
+                            // Устанавливаем новый поток
+                            localStream = stream;
+                            currentDeviceId = camera.deviceId;
+                            
+                            // Сохраняем в localStorage информацию о последней используемой камере
+                            localStorage.setItem('lastCameraId', currentDeviceId);
+                            
+                            // Обновляем локальное видео
+                            updateLocalVideoStream(stream);
+                            
+                            // Обновляем все активные вызовы с новым потоком
+                            await updateAllCalls(stream);
+                            
+                            // Останавливаем старый поток после успешного переключения
+                            if (oldStream) {
+                                oldStream.getTracks().forEach(track => track.stop());
+                            }
+                            
+                            log(`Камера успешно переключена на: ${camera.deviceId}`);
+                            showNotification('Камера переключена', 1500);
+                            
+                            foundCamera = true;
+                        } catch (error) {
+                            log(`Ошибка при переключении на камеру ${camera.deviceId}: ${error}`);
+                            // Помечаем камеру как недоступную в кэше
+                            cameraAvailability[camera.deviceId] = false;
+                        }
+                    }
+                    
+                    // Переходим к следующей камере
+                    nextIndex = (nextIndex + 1) % cameras.length;
+                    attempts++;
+                }
+                
+                if (!foundCamera) {
+                    log('Не удалось найти доступную камеру для переключения');
+                    showNotification('Не удалось переключить камеру', 2000);
+                }
+                
+            } catch (error) {
+                const errorDetails = getCameraErrorDetails(error);
+                log(`Ошибка при переключении камеры: ${errorDetails}`);
+                
+                showNotification('Ошибка переключения камеры', 2000);
+                
+                // Пробуем восстановить предыдущую камеру
+                try {
+                    const fallbackConstraints = {
+                        video: currentDeviceId ? { deviceId: { exact: currentDeviceId } } : true,
+                        audio: true
+                    };
+                    
+                    const fallbackStream = await navigator.mediaDevices.getUserMedia(fallbackConstraints);
+                    
+                    // Сохраняем состояние аудио
+                    const audioTracks = fallbackStream.getAudioTracks();
+                    if (audioTracks.length > 0) {
+                        audioTracks[0].enabled = isAudioEnabled;
+                    }
+                    
+                    if (localStream) {
+                        localStream.getTracks().forEach(track => track.stop());
+                    }
+                    
+                    localStream = fallbackStream;
+                    updateLocalVideoStream(fallbackStream);
+                    await updateAllCalls(fallbackStream);
+                    
+                    log(`Восстановлена предыдущая камера`);
+                    
+                } catch (fallbackError) {
+                    log(`Не удалось восстановить камеру: ${fallbackError}`);
+                    showNotification('Не удалось восстановить камеру', 2000);
+                }
+            } finally {
+                switchCameraBtn.disabled = false;
+            }
+        }
+
+        // Функция для получения текущей активной камеры
+        async function getCurrentCamera() {
+            if (!localStream) return null;
+            
+            const videoTrack = localStream.getVideoTracks()[0];
+            if (!videoTrack) return null;
+            
+            const settings = videoTrack.getSettings();
+            return settings.deviceId || null;
+        }
+
+        // Инициализация проверки камер при загрузке
+        async function initializeCameraCheck() {
+            const cameras = await getAvailableCameras();
+            
+            // Загружаем информацию о доступности камер из localStorage
+            const savedCameraAvailability = localStorage.getItem('cameraAvailability');
+            if (savedCameraAvailability) {
+                try {
+                    cameraAvailability = JSON.parse(savedCameraAvailability);
+                    log('Загружена информация о доступности камер из кэша');
+                } catch (e) {
+                    log('Ошибка при загрузке информации о доступности камер из кэша');
+                    cameraAvailability = {};
+                }
+            }
+            
+            // Проверяем доступность всех камер
+            for (const camera of cameras) {
+                await checkCameraAvailability(camera.deviceId);
+            }
+            
+            // Сохраняем информацию о доступности камер в localStorage
+            localStorage.setItem('cameraAvailability', JSON.stringify(cameraAvailability));
+            
+            // Показываем/скрываем кнопку переключения в зависимости от доступности камер
+            const availableCamerasCount = Object.values(cameraAvailability).filter(status => status).length;
+            if (availableCamerasCount < 2) {
+                switchCameraBtn.style.display = 'none';
+                log('Переключение камер недоступно (менее 2 доступных камер)');
+            } else {
+                switchCameraBtn.style.display = 'flex';
+            }
+            
+            // Восстанавливаем последнюю использованную камеру, если она доступна
+            const lastCameraId = localStorage.getItem('lastCameraId');
+            if (lastCameraId && cameraAvailability[lastCameraId]) {
+                try {
+                    const constraints = {
+                        video: { deviceId: { exact: lastCameraId } },
+                        audio: true
+                    };
+                    
+                    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                    
+                    // Сохраняем состояние аудио
+                    const audioTracks = stream.getAudioTracks();
+                    if (audioTracks.length > 0) {
+                        audioTracks[0].enabled = isAudioEnabled;
+                    }
+                    
+                    if (localStream) {
+                        localStream.getTracks().forEach(track => track.stop());
+                    }
+                    
+                    localStream = stream;
+                    currentDeviceId = lastCameraId;
+                    
+                    updateLocalVideoStream(stream);
+                    await updateAllCalls(stream);
+                    
+                    log(`Восстановлена последняя использованная камера: ${lastCameraId}`);
+                } catch (error) {
+                    log(`Не удалось восстановить последнюю использованную камеру: ${error}`);
+                }
+            }
+        }
+
+        // Функция обновления локального видео
+        function updateLocalVideoStream(stream) {
+            const localContainer = videoContainers['local'];
+            if (localContainer) {
+                const video = localContainer.querySelector('video');
+                if (video) {
+                    video.srcObject = stream;
+                }
+            }
+            
+            // Обновляем мониторинг потока
+            if (streamMonitors['local']) {
+                clearInterval(streamMonitors['local']);
+            }
+            monitorStream(stream, 'local');
+        }
+
+        // Функция обновления всех активных вызовов с новым потоком
+        async function updateAllCalls(stream) {
+            const updatePromises = [];
+            
+            // Обновляем все активные вызовы
+            Object.values(activeCalls).forEach(call => {
+                if (call.peerConnection && call.peerConnection.signalingState === 'stable') {
+                    // Получаем видеотрек и аудиотрек из нового потока
+                    const videoTrack = stream.getVideoTracks()[0];
+                    const audioTrack = stream.getAudioTracks()[0];
+                    
+                    // Получаем отправители из peerConnection
+                    const senders = call.peerConnection.getSenders();
+                    
+                    // Обновляем видеотрек
+                    const videoSender = senders.find(sender => 
+                        sender.track && sender.track.kind === 'video'
+                    );
+                    if (videoSender && videoTrack) {
+                        updatePromises.push(
+                            videoSender.replaceTrack(videoTrack)
+                                .then(() => log(`Видеотрек обновлен для ${call.peer}`))
+                                .catch(error => log(`Ошибка обновления видеотрека для ${call.peer}: ${error}`))
+                        );
+                    }
+                    
+                    // Обновляем аудиотрек
+                    const audioSender = senders.find(sender => 
+                        sender.track && sender.track.kind === 'audio'
+                    );
+                    if (audioSender && audioTrack) {
+                        updatePromises.push(
+                            audioSender.replaceTrack(audioTrack)
+                                .then(() => log(`Аудиотрек обновлен для ${call.peer}`))
+                                .catch(error => log(`Ошибка обновления аудиотрека для ${call.peer}: ${error}`))
+                        );
+                    }
+                }
+            });
+            
+            // Ждем завершения всех обновлений
+            await Promise.all(updatePromises);
+            log('Все вызовы обновлены с новым потоком');
+        }
+
+        function scheduleReload() {
+            if (!reloadScheduled) {
+                reloadScheduled = true;
+                log('Scheduling page reload in 2 seconds...');
+                setTimeout(() => {
+                    window.location.reload();
+                }, 2000);
+            }
+        }
+
+        // Функция для создания Peer соединения
+        function createPeerConnection(desiredID) {
+            log(`Creating peer connection with ID: ${desiredID}`);
+            
+            return new Promise((resolve, reject) => {
+                const newPeer = new Peer(desiredID, {
+                    host: '0.peerjs.com',
+                    port: 443,
+                    path: '/',
+                    debug: 3
+                });
+
+                newPeer.on('open', id => {
+                    log(`Successfully connected with ID: ${id}`);
+                    resolve(newPeer);
+                });
+
+                newPeer.on('error', error => {
+                    if (error.type === 'unavailable-id' && desiredID === roomID && retryCount < MAX_RETRIES) {
+                        log(`Room ID ${desiredID} is taken, trying with random ID...`);
+                        retryCount++;
+                        newPeer.destroy();
+                        
+                        const randomID = 'user-' + Math.random().toString(36).substr(2, 9);
+                        createPeerConnection(randomID).then(resolve).catch(reject);
+                    } else {
+                        log(`Peer connection failed: ${error.type} - ${error.message}`);
+                        reject(error);
+                    }
+                });
+
+                setTimeout(() => {
+                    reject(new Error('Connection timeout'));
+                }, 10000);
+            });
+        }
+
+        // Функция для мониторинга состояния потока
+        function monitorStream(stream, userID) {
+            if (streamMonitors[userID]) {
+                clearInterval(streamMonitors[userID]);
+            }
+
+            const monitorInterval = setInterval(() => {
+                const activeTracks = stream.getTracks().filter(track => 
+                    track.readyState === 'live' && !track.muted
+                );
+                
+                const hasActiveStream = activeTracks.length > 0;
+                updateStreamStatus(userID, hasActiveStream);
+                
+                if (!hasActiveStream && userID !== 'local') {
+                    log(`Поток от ${userID} прервался`);
+                    hideVideoContainer(userID);
+                } else if (hasActiveStream && userID !== 'local') {
+                    showVideoContainer(userID);
+                }
+            }, 3000);
+
+            streamMonitors[userID] = monitorInterval;
+
+            // Также отслеживаем события окончания треков
+            stream.getTracks().forEach(track => {
+                track.onended = () => {
+                    log(`Трек ${track.kind} завершился у ${userID}`);
+                    updateStreamStatus(userID, false);
+                    if (userID !== 'local') {
+                        hideVideoContainer(userID);
+                    }
+                };
+            });
+        }
+
+        function updateStreamStatus(userID, isActive) {
+            const container = videoContainers[userID];
+            if (!container) return;
+
+            const statusElement = container.querySelector('.stream-status');
+            if (statusElement) {
+                statusElement.textContent = isActive ? 'online' : 'offline';
+                statusElement.className = `stream-status ${isActive ? 'status-online' : 'status-offline'}`;
+            }
+        }
+
+        function hideVideoContainer(userID) {
+            const container = videoContainers[userID];
+            if (container && !container.classList.contains('no-stream')) {
+                container.classList.add('no-stream');
+                log(`Скрываю видео контейнер для: ${userID}`);
+            }
+        }
+
+        function showVideoContainer(userID) {
+            const container = videoContainers[userID];
+            if (container && container.classList.contains('no-stream')) {
+                container.classList.remove('no-stream');
+                log(`Показываю видео контейнер для: ${userID}`);
+            }
+        }
+
+        log('Requesting media devices access...');
+        
+        navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+            .then(stream => {
+                log('Media access granted');
+                localStream = stream;
+                
+                // Получаем ID текущей камеры
+                const videoTrack = stream.getVideoTracks()[0];
+                if (videoTrack) {
+                    const settings = videoTrack.getSettings();
+                    currentDeviceId = settings.deviceId;
+                    log(`Текущая камера: ${currentDeviceId}`);
+                    
+                    // Сохраняем информацию о последней использованной камере
+                    localStorage.setItem('lastCameraId', currentDeviceId);
+                }
+                
+                addVideoStream(stream, 'local', true);
+                monitorStream(stream, 'local');
+
+                // Инициализируем проверку камер после получения доступа
+                initializeCameraCheck();
+
+                createPeerConnection(roomID)
+                    .then(peerInstance => {
+                        peer = peerInstance;
+                        log(`My peer ID is: ${peer.id}`);
+                        
+                        if (peer.id === roomID) {
+                            isRoomHost = true;
+                            log(`I am the room host (first participant)`);
+                        } else {
+                            log(`Connected as participant to room: ${roomID}`);
+                        }
+                        
+                        participants.add(peer.id);
+                        updateParticipantCount();
+                        
+                        updateLocalVideoInfo(peer.id);
+                        
+                        setupPeerEvents();
+                        connectToRoom();
+                    })
+                    .catch(error => {
+                        log(`Failed to create peer connection: ${error}`);
+                    });
+            })
+            .catch(error => {
+                log(`Error accessing media devices: ${error}`);
+            });
+
+        function updateLocalVideoInfo(peerID) {
+            const localContainer = videoContainers['local'];
+            if (localContainer) {
+                const userInfo = localContainer.querySelector('.user-info');
+                if (userInfo) {
+                    userInfo.textContent = `You (${peerID.substring(0, 8)})`;
+                }
+            }
+        }
+
+        function setupPeerEvents() {
+            peer.on('error', error => {
+                log(`PeerJS Error: ${error.type} - ${error.message}`);
+            });
+
+            peer.on('disconnected', () => {
+                log('Disconnected from PeerJS server');
+            });
+
+            peer.on('close', () => {
+                log('Peer connection closed');
+                // Очищаем все мониторы
+                Object.values(streamMonitors).forEach(interval => clearInterval(interval));
+                // Если хост теряет соединение с сервером, перезагружаем страницу
+                if (isRoomHost) {
+                    scheduleReload();
+                }
+            });
+
+            peer.on('call', call => {
+                log(`Incoming call from: ${call.peer}`);
+                try {
+                    call.answer(localStream);
+                    log(`Answered call from: ${call.peer}`);
+                    setupCall(call);
+                } catch (error) {
+                    log(`Error answering call from ${call.peer}: ${error}`);
+                }
+            });
+        }
+
+        function connectToRoom() {
+            log(`Setting up room connections...`);
+            
+            peer.on('connection', conn => {
+                log(`Incoming connection from: ${conn.peer}`);
+                setupConnection(conn);
+            });
+
+            if (!isRoomHost) {
+                log(`Connecting to room host: ${roomID}`);
+                try {
+                    const roomConnection = peer.connect(roomID);
+                    hostConnection = roomConnection;
+                    
+                    roomConnection.on('open', () => {
+                        log(`Connected to room host: ${roomID}`);
+                        setupConnection(roomConnection);
+                        
+                        setTimeout(() => {
+                            log(`Requesting participants list from host`);
+                            roomConnection.send({
+                                type: 'get-participants'
+                            });
+                        }, 1000);
+                    });
+                    
+                    roomConnection.on('error', error => {
+                        log(`Failed to connect to room host: ${error}`);
+                    });
+
+                    roomConnection.on('close', () => {
+                        log('Connection to host closed');
+                        scheduleReload();
+                    });
+                    
+                } catch (error) {
+                    log(`Error connecting to room host: ${error}`);
+                }
+            } else {
+                log(`Waiting for participants to connect...`);
+            }
+        }
+
+        function setupConnection(conn) {
+            if (connections[conn.peer]) {
+                log(`Connection to ${conn.peer} already exists`);
+                return;
+            }
+
+            log(`Setting up connection with: ${conn.peer}`);
+            connections[conn.peer] = conn;
+            
+            conn.on('open', () => {
+                log(`Connection established with: ${conn.peer}`);
+                
+                participants.add(conn.peer);
+                updateParticipantCount();
+                
+                conn.send({ 
+                    type: 'user-info',
+                    peerID: peer.id,
+                    isHost: isRoomHost,
+                    roomID: roomID
+                });
+                
+                if (isRoomHost) {
+                    broadcastToParticipants({
+                        type: 'new-participant',
+                        participantID: conn.peer
+                    });
+                    
+                    setTimeout(() => {
+                        conn.send({
+                            type: 'participants-list',
+                            participants: Array.from(participants)
+                        });
+                    }, 500);
+                }
+                
+                setTimeout(() => {
+                    log(`Initiating call to: ${conn.peer}`);
+                    try {
+                        const call = peer.call(conn.peer, localStream);
+                        setupCall(call);
+                    } catch (error) {
+                        log(`Error calling ${conn.peer}: ${error}`);
+                    }
+                }, 1000);
+            });
+
+            conn.on('data', data => {
+                log(`Received data from ${conn.peer}: ${JSON.stringify(data)}`);
+                
+                if (data.type === 'user-info') {
+                    log(`User info: ${data.peerID} (host: ${data.isHost})`);
+                }
+                else if (data.type === 'get-participants' && isRoomHost) {
+                    conn.send({
+                        type: 'participants-list',
+                        participants: Array.from(participants)
+                    });
+                }
+                else if (data.type === 'participants-list') {
+                    log(`Received participants list: ${data.participants.join(', ')}`);
+                    
+                    data.participants.forEach(participantID => {
+                        if (participantID !== peer.id && !connections[participantID] && participantID !== roomID) {
+                            log(`Connecting to participant: ${participantID}`);
+                            try {
+                                const participantConn = peer.connect(participantID);
+                                setupConnection(participantConn);
+                            } catch (error) {
+                                log(`Error connecting to participant ${participantID}: ${error}`);
+                            }
+                        }
+                    });
+                }
+                else if (data.type === 'new-participant') {
+                    log(`New participant joined: ${data.participantID}`);
+                    
+                    if (data.participantID !== peer.id && !connections[data.participantID]) {
+                        log(`Connecting to new participant: ${data.participantID}`);
+                        try {
+                            const newParticipantConn = peer.connect(data.participantID);
+                            setupConnection(newParticipantConn);
+                        } catch (error) {
+                            log(`Error connecting to new participant ${data.participantID}: ${error}`);
+                        }
+                    }
+                }
+            });
+
+            conn.on('close', () => {
+                log(`Connection closed with: ${conn.peer}`);
+                removeParticipant(conn.peer);
+            });
+
+            conn.on('error', error => {
+                log(`Connection error with ${conn.peer}: ${error}`);
+            });
+        }
+
+        function setupCall(call) {
+            log(`Setting up call with: ${call.peer}`);
+            
+            // Сохраняем вызов для последующего обновления
+            activeCalls[call.peer] = call;
+            
+            call.on('stream', remoteStream => {
+                log(`Received remote stream from: ${call.peer}`);
+                if (!videoContainers[call.peer]) {
+                    addVideoStream(remoteStream, call.peer, false);
+                    monitorStream(remoteStream, call.peer);
+                }
+            });
+
+            call.on('close', () => {
+                log(`Call closed with: ${call.peer}`);
+                // Удаляем вызов из активных
+                delete activeCalls[call.peer];
+                removeParticipant(call.peer);
+            });
+
+            call.on('error', error => {
+                log(`Call error with ${call.peer}: ${error}`);
+                // Удаляем вызов из активных
+                delete activeCalls[call.peer];
+                removeParticipant(call.peer);
+            });
+        }
+
+        function removeParticipant(participantID) {
+            participants.delete(participantID);
+            delete connections[participantID];
+            delete activeCalls[participantID];
+            
+            // Очищаем монитор потока
+            if (streamMonitors[participantID]) {
+                clearInterval(streamMonitors[participantID]);
+                delete streamMonitors[participantID];
+            }
+            
+            removeVideoContainer(participantID);
+            
+            updateParticipantCount();
+            
+            log(`Participant ${participantID} removed. Remaining: ${participants.size}`);
+            
+            if (isRoomHost) {
+                broadcastToParticipants({
+                    type: 'participant-left',
+                    participantID: participantID
+                });
+            }
+        }
+
+        function removeVideoContainer(participantID) {
+            if (videoContainers[participantID]) {
+                const container = videoContainers[participantID];
+                if (container.parentNode) {
+                    container.parentNode.removeChild(container);
+                }
+                delete videoContainers[participantID];
+                log(`Video container removed for: ${participantID}`);
+            }
+        }
+
+        function broadcastToParticipants(message) {
+            if (!isRoomHost) return;
+            
+            log(`Broadcasting to ${Object.keys(connections).length} participants: ${message.type}`);
+            
+            Object.values(connections).forEach(conn => {
+                if (conn.open) {
+                    conn.send(message);
+                }
+            });
+        }
+
+        function addVideoStream(stream, userID, isLocal) {
+            if (videoContainers[userID]) {
+                log(`Video container already exists for: ${userID}`);
+                return;
+            }
+
+            log(`Adding video stream for: ${userID} (local: ${isLocal})`);
+            
+            const container = document.createElement('div');
+            container.className = `video-container ${isLocal ? 'local' : ''}`;
+            container.id = `video-${userID}`;
+            
+            const video = document.createElement('video');
+            video.srcObject = stream;
+            video.muted = isLocal;
+            video.playsInline = true;
+            video.autoplay = true;
+            
+            const userInfo = document.createElement('div');
+            userInfo.className = 'user-info';
+            userInfo.textContent = isLocal ? 'You' : userID.substring(0, 8);
+            
+            const streamStatus = document.createElement('div');
+            streamStatus.className = 'stream-status status-online';
+            streamStatus.textContent = 'online';
+            
+            container.appendChild(video);
+            container.appendChild(userInfo);
+            container.appendChild(streamStatus);
+            videoGrid.appendChild(container);
+            
+            videoContainers[userID] = container;
+            
+            video.addEventListener('loadedmetadata', () => {
+                log(`Video metadata loaded for: ${userID}`);
+                video.play();
+            });
+        }
+
+        function updateParticipantCount() {
+            const countElement = document.getElementById('participant-count');
+            if (countElement) {
+                countElement.textContent = participants.size;
+            }
+        }
+
+        window.addEventListener('hashchange', () => {
+            const newRoomID = window.location.hash.substring(1);
+            log(`URL hash changed to: ${newRoomID}`);
+            if (newRoomID !== roomID) {
+                log(`Room changed, reloading page...`);
+                window.location.reload();
+            }
+        });
+
+        log(`WebRTC supported: ${!!navigator.mediaDevices && !!navigator.mediaDevices.getUserMedia}`);
+    </script>
+</body>
+</html>
